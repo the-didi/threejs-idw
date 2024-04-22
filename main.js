@@ -5,7 +5,7 @@ import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeom
 import GUI from "lil-gui";
 import * as THREE from "three";
 import { dataSource } from "./data.js";
-import { Lut } from "three/addons/math/Lut.js";
+import { Lut } from "./Lut.js";
 export function createLinearGradientCanvas() {
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
@@ -18,6 +18,11 @@ export function createLinearGradientCanvas() {
   context.fillRect(0, 0, canvas.width, canvas.height);
   const texture = new THREE.CanvasTexture(canvas);
   return texture;
+}
+
+function updateVolumn(value) {
+  const dom = document.getElementById("volumn");
+  dom.innerText = Math.floor(value * 100);
 }
 
 function initDataByDataSource(dataSource) {
@@ -50,6 +55,7 @@ function initDataByDataSource(dataSource) {
     lon: bbox.minLon + (bbox.maxLon - bbox.minLon) / 2,
     lat: bbox.minLat + (bbox.maxLat - bbox.minLat) / 2,
   };
+  console.log(bbox);
   let result = [];
   dataSource.forEach((ele) => {
     let lat = Number.parseFloat(ele.latitude);
@@ -72,11 +78,61 @@ function initDataByDataSource(dataSource) {
 class App {
   constructor() {
     this.initApp();
-    this.initGUI();
     this.initGeometry();
+    this.initGUI();
     this.addEventListener();
   }
-
+  reloadInstanceMesh() {
+    this.scene.remove(this.renderingInstanceMesh);
+    const _this = this;
+    setTimeout(() => {
+      function createVoxel(voxels) {
+        const dummy = new THREE.Object3D();
+        const params = _this.params;
+        let filterVoxel = voxels
+          .filter(
+            (value, index) => _this.instanceMeshValue[index] > params.filter
+          )
+          .map((ele) => {
+            ele.color = _this.lut.getColor(ele.value);
+            return ele;
+          });
+        _this.params.volumn =
+          (filterVoxel.length *
+            _this.params.resolution *
+            _this.params.resolution *
+            _this.params.resolution) /
+          9;
+        updateVolumn(_this.params.volumn);
+        const voxelGeometry = new RoundedBoxGeometry(
+          params.boxSize,
+          params.boxSize,
+          params.boxSize,
+          2,
+          params.boxRoundness
+        );
+        const voxelMaterial = new THREE.MeshBasicMaterial({
+          transparent: true,
+        });
+        const instanceMesh = new THREE.InstancedMesh(
+          voxelGeometry,
+          voxelMaterial,
+          filterVoxel.length
+        );
+        instanceMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        for (let i = 0; i < filterVoxel.length; i++) {
+          instanceMesh.setColorAt(i, filterVoxel[i].color);
+          dummy.position.copy(filterVoxel[i].position);
+          dummy.updateMatrix();
+          instanceMesh.setMatrixAt(i, dummy.matrix);
+        }
+        return instanceMesh;
+      }
+      const newInstanceMesh = createVoxel(_this.modelVoxels);
+      _this.scene.add(newInstanceMesh);
+      _this.renderingInstanceMesh = newInstanceMesh;
+    });
+  }
   initGeometry() {
     // 1. 根据dataSource进行建模
     const { result, bbox } = initDataByDataSource(
@@ -88,8 +144,18 @@ class App {
     const positions = this.dataSource.map((ele) => [ele.x, ele.y, ele.z]);
     const vs = this.dataSource.map((ele) => ele.value);
     const maxv = Math.max(...vs);
+    this.maxv = maxv;
     this.lut.setMax(maxv);
     this.lut.setMin(0);
+
+    // 初始化刻度尺
+    const dom = document.getElementById("unit");
+    for (let i = 0; i <= maxv; i += 0.5) {
+      const span = document.createElement("span");
+      span.innerText = i.toFixed(2) + "--";
+      dom.appendChild(span);
+    }
+
     this.idw = new IDW(
       {
         positions: positions,
@@ -119,9 +185,23 @@ class App {
       2,
       params.boxRoundness
     );
-    const voxelMaterial = new THREE.MeshBasicMaterial({});
+    const voxelMaterial = new THREE.MeshBasicMaterial({
+      transparent: true,
+    });
     const modelVoxels = computedVoxel();
     const instanceMesh = createVoxel(modelVoxels);
+    this.modelVoxels = modelVoxels;
+    this.params.volumn =
+      (this.modelVoxels.length *
+        this.params.resolution *
+        this.params.resolution *
+        this.params.resolution) /
+      9;
+    // 更新值
+    updateVolumn(_this.params.volumn);
+    const canvas = document.getElementById("colorBar");
+    _this.lut.updateCanvas(canvas);
+    this.renderingInstanceMesh = instanceMesh;
     this.scene.add(instanceMesh);
     function createVoxel(voxels) {
       const dummy = new THREE.Object3D();
@@ -146,6 +226,7 @@ class App {
       let modelVoxels = [];
       let boundingBox = _this.geometry.boundingBox;
       boundingBox.min.y += 0.5 * params.resolution;
+      let vs = [];
       for (
         let i = boundingBox.min.x;
         i < boundingBox.max.x;
@@ -163,12 +244,19 @@ class App {
           ) {
             const pos = new THREE.Vector3(i, j, k);
             const predictValue = _this.idw.evaluate([pos.x, pos.y, pos.z], 3);
+            vs.push(predictValue);
             // const color = new THREE.Color((predictValue / maxv) * 0xffffff);
             const color = _this.lut.getColor(predictValue);
-            modelVoxels.push({ color: color, position: pos });
+            modelVoxels.push({
+              color: color,
+              position: pos,
+              value: predictValue,
+            });
           }
         }
       }
+      _this.instanceMeshValue = new Float32Array(vs);
+
       return modelVoxels;
     }
   }
@@ -178,12 +266,11 @@ class App {
     this.lut.setColorMap("rainbow");
     const _this = this;
     this.params = {
-      resolution: 15,
-      modelPreviewSize: 2,
-      modelSize: 9,
-      gridSize: 0,
-      boxSize: 14,
-      boxRoundness: 0.03,
+      resolution: 5,
+      boxSize: 5,
+      filter: 0,
+      colorMap: "cooltowarm",
+      volumn: 0,
     };
     this.canvas = document.getElementById("renderingCanvas");
     this.canvas.width = this.canvas.clientWidth;
@@ -228,10 +315,24 @@ class App {
   initGUI() {
     const _this = this;
     this.gui
-      .add(this.params, "resolution", 5, 10, 1)
-      .name("分辨率")
-      .onChange(() => {
-        _this.needUpdate = true;
+      .add(this.params, "filter", 0, _this.maxv, 0.1)
+      .name("过滤")
+      .onFinishChange(() => {
+        _this.reloadInstanceMesh();
+      });
+    this.gui
+      .add(this.params, "colorMap", [
+        "rainbow",
+        "cooltowarm",
+        "blackbody",
+        "grayscale",
+      ])
+      .onChange(function (val) {
+        _this.lut.setColorMap(val);
+        // 更新canvas
+        const canvas = document.getElementById("colorBar");
+        _this.lut.updateCanvas(canvas);
+        _this.reloadInstanceMesh();
       });
   }
   addEventListener() {
